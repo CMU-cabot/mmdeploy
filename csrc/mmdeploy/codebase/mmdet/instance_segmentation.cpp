@@ -18,9 +18,12 @@ class ResizeInstanceMask : public ResizeBBox {
       mask_thr_binary_ = cfg["params"].value("mask_thr_binary", mask_thr_binary_);
       is_rcnn_ = cfg["params"].contains("rcnn");
       is_resize_mask_ = cfg["params"].value("is_resize_mask", is_resize_mask_);
+      is_crop_rtmdt_ins_mask_ = cfg["params"].value("is_crop_rtmdt_ins_mask", is_crop_rtmdt_ins_mask_);
     }
     operation::Context ctx(device_, stream_);
     warp_affine_ = operation::Managed<operation::WarpAffine>::Create("bilinear");
+    crop_ = operation::Managed<operation::Crop>::Create();
+    threshold_mask_ = operation::Managed<::mmdeploy::operation::ThresholdMask>::Create();
     permute_ = operation::Managed<::mmdeploy::operation::Permute>::Create();
   }
 
@@ -133,7 +136,35 @@ class ResizeInstanceMask : public ResizeBBox {
           OUTCOME_TRY(CopyToHost(mask, h_warped_masks.emplace_back()));
         }
       }
+    } else if (!is_rcnn_ && is_crop_rtmdt_ins_mask_) {
+      // crop rtmdet-inst mask image by bbox, and threshold mask by CUDA to optimize memory copy speed
+      // default is false
+      for (auto& det : result) {
+        auto mask = d_mask.Slice(det.index);
+        auto mask_height = (int)mask.shape(1);
+        auto mask_width = (int)mask.shape(2);
+        mask.Reshape({1, mask_height, mask_width, 1});
 
+        auto& bbox = det.bbox;
+        Tensor crop_mask;
+        auto x0 = std::max(int(bbox[0]*scale_factor_[0]), 0);
+        auto y0 = std::max(int(bbox[1]*scale_factor_[1]), 0);
+        auto x1 = std::min(int(bbox[2]*scale_factor_[0]), mask_width-1);
+        auto y1 = std::min(int(bbox[3]*scale_factor_[1]), mask_height-1);
+        OUTCOME_TRY(crop_.Apply(mask, crop_mask, y0, x0, y1, x1));
+
+        Tensor thres_mask;
+        OUTCOME_TRY(threshold_mask_.Apply(crop_mask, thres_mask, mask_thr_binary_));
+        OUTCOME_TRY(CopyToHost(thres_mask, h_warped_masks.emplace_back()));
+      }
+
+      OUTCOME_TRY(stream_.Wait());
+
+      for (size_t i = 0; i < h_warped_masks.size(); ++i) {
+        result[i].mask = TensorMask2MatMask(h_warped_masks[i]);
+      }
+
+      return success();
     } else {  // rtmdet-inst
       auto mask_channel = (int)d_mask.shape(0);
       auto mask_height = (int)d_mask.shape(1);
@@ -181,6 +212,11 @@ class ResizeInstanceMask : public ResizeBBox {
     return success();
   }
 
+  Mat TensorMask2MatMask(const Tensor& h_mask) const {
+    return {static_cast<int>(h_mask.shape(1)), static_cast<int>(h_mask.shape(2)), PixelFormat::kGRAYSCALE, DataType::kINT8,
+            std::shared_ptr<void>(const_cast<void*>(h_mask.data()),[buffer = h_mask.buffer()](auto) {})};
+  }
+
   Mat ThresholdMask(const Tensor& h_mask) const {
     cv::Mat warped_mat = cpu::Tensor2CVMat(h_mask);
     warped_mat = warped_mat > mask_thr_binary_;
@@ -190,10 +226,13 @@ class ResizeInstanceMask : public ResizeBBox {
 
  private:
   operation::Managed<operation::WarpAffine> warp_affine_;
+  operation::Managed<operation::Crop> crop_;
+  operation::Managed<operation::ThresholdMask> threshold_mask_;
   ::mmdeploy::operation::Managed<::mmdeploy::operation::Permute> permute_;
   float mask_thr_binary_{.5f};
   bool is_rcnn_{true};
   bool is_resize_mask_{true};
+  bool is_crop_rtmdt_ins_mask_{false};
   std::vector<float> scale_factor_{1.0, 1.0, 1.0, 1.0};
 };
 

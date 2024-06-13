@@ -98,6 +98,13 @@ class Permute : public Operation {
 };
 MMDEPLOY_DECLARE_REGISTRY(Permute, unique_ptr<Permute>());
 
+// threshold mask
+class ThresholdMask : public Operation {
+ public:
+  virtual Result<void> apply(const Tensor& src, Tensor& dst, float threshold) = 0;
+};
+MMDEPLOY_DECLARE_REGISTRY(ThresholdMask, unique_ptr<ThresholdMask>());
+
 }  // namespace mmdeploy::operation
 
 #endif  // MMDEPLOY_CSRC_MMDEPLOY_PREPROCESS_OPERATION_RESIZE_H_

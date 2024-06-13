@@ -21,7 +21,9 @@ set(SRCS resize.cpp
         warp_affine.cpp
         crop_resize_pad.cpp
         permute.cpp
-        permute.cu)
+        permute.cu
+        threshold_mask.cpp
+        threshold_mask.cu)
 
 mmdeploy_add_module(${PROJECT_NAME} "${SRCS}")
 
